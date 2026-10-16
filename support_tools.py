@@ -280,6 +280,7 @@ class SupportTools:
         try:
             return json.dumps(handler(**args), default=str), False
         except ToolError as e:
+            
             out = e.to_dict()
         except self.db.OperationalError as e:      # timeouts, locks, connection trouble
             out = {"error": "database_error", "message": str(e).strip(),

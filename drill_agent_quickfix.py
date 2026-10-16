@@ -43,6 +43,7 @@ def tool_error(code, message, hint):
     return {"error": code, "message": message, "hint": hint}
 
 
+
 # ───────────────────────────── tool handlers ─────────────────────────────
 
 def find_customer(name):
