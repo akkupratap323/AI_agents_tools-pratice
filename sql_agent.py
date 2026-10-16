@@ -139,7 +139,7 @@ def run_agent (messages):
                     except Exception as e:
                         print(f"[turn {i}] ERROR {type(e).__name__} - {e}")
                         return {"error":str(e)}
-               
+                
                 result =  safe_call(handler,**args)
                 print(f"[turn {i}] RESULT {str(result)} ")
                 messages.append({"role":"tool", "tool_call_id":tc.id, "content":json.dumps(result)})

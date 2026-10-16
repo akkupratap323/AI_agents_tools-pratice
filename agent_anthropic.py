@@ -86,6 +86,9 @@ def text_of(content):
 #   bounded by MAX_TURNS; every stop_reason handled explicitly.
 # ═════════════════════════════════════════════════════════════════════════════
 
+
+
+
 def run_agent(messages, tools):
     for turn in range(1, MAX_TURNS + 1):
         t0 = time.monotonic()

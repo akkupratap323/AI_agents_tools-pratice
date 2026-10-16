@@ -21,16 +21,28 @@ Scenarios to try (python drill_agent_broken.py, then type them):
   7. Refund order 2.
   8. Show me all of Asha Rao's orders.
 """
-import json
+import json,inspect
 import os
 import shutil
 import sqlite3
+from tool_debug import probe, probe_many, check_all_contracts, check_history_chat
+from tool_dispatcher import run_tool, tool_error
 
 import httpx
 from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()
+
+from phoenix.otel import register
+from openinference.instrumentation.openai import OpenAIInstrumentor
+
+tracer_provider = register(project_name="tool-drill")              # ONE register only
+OpenAIInstrumentor().instrument(tracer_provider=tracer_provider)   # traces every model call
+tracer = tracer_provider.get_tracer(__name__)                      # ← the missing line
+
+
+
 client = OpenAI(
     api_key=os.environ["DEEPSEEK_API_KEY"],
     base_url="https://api.deepseek.com",
@@ -53,25 +65,83 @@ db.execute(
 db.commit()
 
 
-# ───────────────────────────── tool handlers ─────────────────────────────
+def tool_error(code, message, hint=None):
+    error = {"error": code, "message": message}
+    if hint:
+        error["hint"] = hint
+    return error
 
+#probe
+
+def check_contract(schema, fn):
+    """Accepts a Chat Completions schema ({"function": {...}}) or an Anthropic one."""
+    spec = schema.get("function", schema)                   # unwrap the chat format
+    params_schema = spec.get("parameters") or spec.get("input_schema") or {}
+    schema_params = set(params_schema.get("properties", {}))
+    schema_required = set(params_schema.get("required", []))
+
+    sig = inspect.signature(fn).parameters
+    fn_params = set(sig)
+    fn_required = {n for n, p in sig.items() if p.default is inspect.Parameter.empty}
+
+    problems = []
+    if spec.get("name") != fn.__name__:
+        problems.append(f"name: schema '{spec.get('name')}' vs function '{fn.__name__}'")
+    if schema_params - fn_params:
+        problems.append(f"in schema but NOT in function: {sorted(schema_params - fn_params)}")
+    if fn_params - schema_params:
+        problems.append(f"in function but NOT in schema: {sorted(fn_params - schema_params)}")
+    if fn_required - schema_required:
+        problems.append(f"function requires these but schema doesn't: {sorted(fn_required - schema_required)}")
+    if len(spec.get("description", "")) < 40:
+        problems.append(f"description too short: {spec.get('description')!r}")
+
+    label = spec.get("name")
+    if problems:
+        print(f"  MISMATCH {label}:")
+        for p in problems:
+            print(f"     - {p}")
+    else:
+        print(f"  ok       {label}")
+    return problems
+
+def probe(fn, **kwargs):
+    """Call fn(**kwargs). Prints OK + output, or CRASH + the error. Never raises."""
+    try:
+        out = fn(**kwargs)
+        print(f"  OK     {fn.__name__}({kwargs}) -> {out!r}"[:220])
+        return out
+    except Exception as e:
+        print(f"  CRASH  {fn.__name__}({kwargs}) -> {type(e).__name__}: {e}"[:220])
+        return None
+
+def check_all_contracts(tools, handlers):
+    print("\n=== contract check (schema vs function) ===")
+    for schema in tools:
+        name = schema.get("function", schema).get("name")
+        fn = handlers.get(name)
+        if fn is None:
+            print(f"  MISSING  {name}: schema exists but no function in handlers")
+            continue
+        check_contract(schema, fn)
+# ───────────────────────────── tool handlers ─────────────────────────────
+@tracer.tool
 def find_customer(name):
     rows = db.execute(
         "SELECT id, name, email, city FROM customers WHERE name = ?", (name,)
     ).fetchall()
     return rows
-print(find_customer("Asha Rao"))
 
-
+@tracer.tool
 def get_customer_orders(customer_id):
     rows = db.execute(
         "SELECT id, order_date, status FROM orders WHERE customer_id = ? ORDER BY order_date",
         (customer_id,),
     ).fetchall()
     return rows
-print(get_customer_orders(1))
 
 
+@tracer.tool
 def get_order_total(order_id):
     status = db.execute("SELECT status FROM orders WHERE id = ?", (order_id,)).fetchone()[0]
     total = db.execute(
@@ -80,7 +150,7 @@ def get_order_total(order_id):
     ).fetchone()[0]
     return {"order_id": order_id, "total": total}
 
-
+@tracer.tool
 def sales_report(start_date, end_date):
     row = db.execute(
         "SELECT COUNT(DISTINCT o.id), SUM(oi.quantity * oi.unit_price_paise) "
@@ -90,12 +160,14 @@ def sales_report(start_date, end_date):
     ).fetchone()
     return {"orders": row[0], "revenue": row[1]}
 
-
+@tracer.tool
 def issue_refund(order_id, amount):
     db.execute("INSERT INTO refunds (order_id, amount) VALUES (?, ?)", (order_id, amount))
     db.execute("UPDATE orders SET status = 'refunded' WHERE id = ?", (order_id,))
     db.commit()
     return "Refund issued."
+
+
 
 
 HANDLERS = {
@@ -120,6 +192,54 @@ def _tool(name, description, properties, required):
     }
 
 
+def run_tool(handlers, name, args):
+    """Run one tool call. Returns (result_dict, is_error). Never raises.
+
+    handlers : dict of  tool name -> python function
+    name     : the tool name the model asked for
+    args     : dict (Anthropic) OR json string (OpenAI / DeepSeek)
+    """
+    # Step 1: does the tool exist?   (handlers[name] would raise KeyError and kill the loop)
+    handler = handlers.get(name)
+    if handler is None:
+        return tool_error("unknown_tool", f"No tool named {name!r}.",
+                          hint=f"Use one of: {', '.join(handlers)}"), True
+
+    # Step 2: arguments -> dict.   OpenAI-style APIs send a JSON STRING, which can be broken.
+    if isinstance(args, str):
+        try:
+            args = json.loads(args or "{}")
+        except json.JSONDecodeError as e:
+            return tool_error("bad_arguments", f"Arguments are not valid JSON: {e}",
+                              hint="Send the arguments as a JSON object."), True
+    if not isinstance(args, dict):
+        return tool_error("bad_arguments", "Arguments must be a JSON object.",
+                          hint="Send the arguments as a JSON object."), True
+
+    # Step 3: check the argument NAMES before calling.
+    #   Why separately? If we just caught TypeError from the call, a crash INSIDE the
+    #   function (e.g. None[0] on a missing row) would be wrongly reported as
+    #   "wrong argument names" - and the model would chase the wrong fix.
+    #   .bind() only checks names/count against the signature; it runs nothing.
+    try:
+        inspect.signature(handler).bind(**args)
+    except TypeError as e:
+        return tool_error("bad_arguments", str(e),
+                          hint="Use exactly the parameter names from the tool schema."), True
+
+    # Step 4: call it, and catch everything else.
+    try:
+        result = handler(**args)        # {"order_id": 5}  ->  handler(order_id=5)
+    except Exception as e:
+        # Anything else: a database error, a bug, a None[0]... report it, don't crash.
+        return tool_error(type(e).__name__, str(e),
+                          hint="Fix the input or tell the user the request failed."), True
+
+    # Step 5: a handler may RETURN an error dict instead of raising - treat it as an error too.
+    if isinstance(result, dict) and "error" in result:
+        return result, True
+    return result, False
+
 TOOLS = [
     _tool("find_customer", "Find a customer.",
           {"name": {"type": "string"}}, ["name"]),
@@ -138,20 +258,47 @@ SYSTEM = "You are a customer support agent for an online shop. Help with custome
 
 # ───────────────────────────── agent loop ─────────────────────────────
 
+def check_history_chat(messages):
+    """Chat Completions: every tool_call id answered exactly once, in the right place."""
+    print("\n=== history check (chat) ===")
+    pending = set()                                   # call ids waiting for an answer
+    ok = True
+    for i, m in enumerate(messages):
+        role = m["role"] if isinstance(m, dict) else m.role
+        if role == "assistant":
+            if pending:
+                print(f"  [{i}] new assistant turn but calls never answered: {pending}"); ok = False
+            calls = (m.get("tool_calls") if isinstance(m, dict) else m.tool_calls) or []
+            pending = {c["id"] if isinstance(c, dict) else c.id for c in calls}
+        elif role == "tool":
+            if m["tool_call_id"] not in pending:
+                print(f"  [{i}] tool result for unknown/answered id {m['tool_call_id']!r}"); ok = False
+            pending.discard(m["tool_call_id"])
+    if pending:
+        print(f"  calls never answered: {pending}"); ok = False
+    print("  history OK" if ok else "  -> fix the pairing above (that's your 400)")
+    return ok
+
+@tracer.agent
 def run_agent(messages):
     for turn in range(10):
-        resp = client.chat.completions.create(model=MODEL, messages=messages, tools=TOOLS)
+        try:
+           resp = client.chat.completions.create(model=MODEL, messages=messages, tools=TOOLS)
+        except Exception as e:
+            print("API error",e)
+            check_history_chat(messages)
+            raise
         msg = resp.choices[0].message
         messages.append(msg)
         print(f"turn:{turn} -> {msg.content}")
-        if not msg.tool_calls:
+        if not msg.tool_calls:            
             return msg.content
         for tc in msg.tool_calls:
             args = json.loads(tc.function.arguments)
             print(f"  -> [turn] -> {tc.function.name}({args})")
-            result = HANDLERS[tc.function.name](**args)
-            print(f"  <- {str(result)[:300]}")
-            messages.append({"role": "tool", "tool_call_id": tc.id, "content": str(result)})
+            result,is_error = run_tool(HANDLERS, tc.function.name, args)
+            print(f"[{'ERROR' if is_error else 'ok'}]  <- {str(result)[:300]}")
+            messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(result)})
     return "(gave up after 10 turns)"
 
 
