@@ -31,7 +31,7 @@ import time
 from contextlib import contextmanager
 from datetime import date, datetime
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # project folder (one level up)
 DEFAULT_PATH = os.path.join(HERE, "support.db")
 SEED_PATH = os.path.join(HERE, "shop.db")
 

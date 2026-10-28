@@ -3,7 +3,7 @@
 Prereq:  docker run -d --name pg -e POSTGRES_PASSWORD=pg -p 5432:5432 postgres:17
          pip install "psycopg[binary]"
 Run:     python make_db.py   (if shop.db is missing)
-         python make_pg.py   (drops and recreates the 4 tables every time)
+         python multi_provider/make_pg.py   (drops and recreates the 4 tables every time)
 
 Same traps as shop.db (mixed-case status, trailing spaces, NULLs, paise),
 plus Postgres-specific ones: order_date / signup_date are real DATE columns.
@@ -14,7 +14,7 @@ import sqlite3
 import psycopg
 
 PG_URL = os.environ.get("PG_URL", "postgresql://postgres:pg@localhost:5432/postgres")
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # project folder (one level up)
 
 SCHEMA = """
 DROP TABLE IF EXISTS refunds, order_items, orders, products, customers;

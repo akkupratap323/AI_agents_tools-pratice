@@ -10,8 +10,8 @@
           set OPENAI_API_KEY in .env   (DeepSeek does NOT support this API -
                                          it only speaks Chat Completions; use
                                          drill_agent.py for DeepSeek)
- Run:     python agent_openai_responses.py --db sqlite
-          python agent_openai_responses.py --db postgres
+ Run:     python multi_provider/agent_openai_responses.py --db sqlite
+          python multi_provider/agent_openai_responses.py --db postgres
  Model:   env OPENAI_MODEL (default below is the one used in OpenAI's own
           function-calling guide; change it to any model your key can use)
 

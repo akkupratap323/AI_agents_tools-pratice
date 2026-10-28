@@ -8,7 +8,7 @@
  Setup (once):
    docker run -d --name pg -e POSTGRES_PASSWORD=pg -p 5432:5432 postgres:17
    pip install "psycopg[binary]"
-   python make_pg.py                      # loads shop.db's data into Postgres
+   python multi_provider/make_pg.py                      # loads shop.db's data into Postgres
  Connection string: env PG_URL, default postgresql://postgres:pg@localhost:5432/postgres
 
  ------------------------------------------------------------------------------

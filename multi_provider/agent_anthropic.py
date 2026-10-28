@@ -9,8 +9,8 @@
  Setup:   pip install anthropic
           set ANTHROPIC_API_KEY in .env (or log in with `ant auth login`)
           Postgres only: see db_postgres.py (docker + make_pg.py)
- Run:     python agent_anthropic.py --db sqlite
-          python agent_anthropic.py --db postgres
+ Run:     python multi_provider/agent_anthropic.py --db sqlite
+          python multi_provider/agent_anthropic.py --db postgres
  Model:   env ANTHROPIC_MODEL, default claude-opus-5-5
 
  ------------------------------------------------------------------------------

@@ -7,19 +7,20 @@ Hands-on practice in **designing and hardening the tool layer of LLM agents**: t
 | File | What it is |
 |---|---|
 | `make_db.py` | Builds `shop.db` (SQLite): customers, products, orders, order_items, with realistic data traps |
-| `make_pg.py` | Loads the same data into PostgreSQL |
 | `q.py` | Tiny CLI to run SQL against `shop.db` |
 | `hello_tool.py`, `loop.py` | First steps: a single tool call, then a full tool loop |
 | `sql_agent.py` | Agent with `list_tables` / `describe_table` / `run_query` tools, hardened step by step |
+| `SQL_AGENT_ANTHROPIC.py` | The same SQL agent on the Anthropic Messages API |
 | `attack.py` | Edge-case inputs fired directly at tool handlers (no model, no cost) |
-| `drill_agent_broken.py` | A **working** support agent with a **weak** tool layer: the debugging exercise |
+| `drill_agent_broken.py` | A **working** support agent with a **weak** tool layer: the debugging exercise (with Phoenix tracing) |
+| `DRILL_AGENT_BROKEN_ANTHROPIC.py` | The same exercise on the Anthropic Messages API |
 | `drill_answers.md` | What's wrong with it and why |
 | `drill_agent_quickfix.py` | The minimal, high-impact fixes, each marked `# FIX:` |
 | `drill_agent.py` | Fully hardened reference version, heavily commented |
+| `tool_dispatcher.py` | Reusable `run_tool()` safety net + result builders for Chat Completions, Anthropic and Responses |
+| `tool_debug.py` | `probe`, schema-vs-function contract check, message-history checkers, the 7-step audit strategy |
 | `support_agent/` | The same agent split into modules (one file per tool, startup contract check) |
-| `support_tools.py`, `db_sqlite.py`, `db_postgres.py` | Provider- and database-agnostic tool layer |
-| `agent_anthropic.py` | Agent on the Anthropic Messages API (`--db sqlite\|postgres`) |
-| `agent_openai_responses.py` | Agent on the OpenAI Responses API (`--db sqlite\|postgres`) |
+| `multi_provider/` | One provider- and database-agnostic tool layer (`support_tools.py`, `db_sqlite.py`, `db_postgres.py`), `make_pg.py`, and agents on the Anthropic Messages API (`agent_anthropic.py`) and OpenAI Responses API (`agent_openai_responses.py`), each with `--db sqlite\|postgres` |
 
 ## Tool contract used throughout
 
@@ -41,14 +42,18 @@ python -m venv .venv
 .venv\Scripts\activate            # Windows  (source .venv/bin/activate on macOS/Linux)
 pip install openai python-dotenv httpx
 python make_db.py                 # creates shop.db
+
+# optional: Phoenix tracing used by drill_agent_broken*.py (UI at http://localhost:6006)
+pip install arize-phoenix openinference-instrumentation-openai openinference-instrumentation-anthropic
+phoenix serve
 ```
 
 Create a `.env` with the key for the provider you use:
 
 ```
 DEEPSEEK_API_KEY=...      # drill_agent*.py, sql_agent.py, support_agent/
-ANTHROPIC_API_KEY=...     # agent_anthropic.py   (pip install anthropic)
-OPENAI_API_KEY=...        # agent_openai_responses.py
+ANTHROPIC_API_KEY=...     # *_ANTHROPIC.py, multi_provider/agent_anthropic.py   (pip install anthropic)
+OPENAI_API_KEY=...        # multi_provider/agent_openai_responses.py
 ```
 
 Postgres (optional):
@@ -56,7 +61,7 @@ Postgres (optional):
 ```bash
 docker run -d --name pg -e POSTGRES_PASSWORD=pg -p 5432:5432 postgres:17
 pip install "psycopg[binary]"
-python make_pg.py
+python multi_provider/make_pg.py
 ```
 
 ## Run
@@ -64,8 +69,9 @@ python make_pg.py
 ```bash
 python drill_agent.py                       # hardened agent (DeepSeek, SQLite)
 python -m support_agent                     # same agent, modular layout
-python agent_anthropic.py --db sqlite       # Anthropic Messages API
-python agent_openai_responses.py --db postgres
+python DRILL_AGENT_BROKEN_ANTHROPIC.py      # the exercise, on Anthropic
+python multi_provider/agent_anthropic.py --db sqlite          # Anthropic Messages API
+python multi_provider/agent_openai_responses.py --db postgres # OpenAI Responses API
 ```
 
 Refunds write to a working copy (`support.db` / `drill.db`); delete it to reset the data.
